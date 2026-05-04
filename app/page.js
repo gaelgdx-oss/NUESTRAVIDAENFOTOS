@@ -24,7 +24,6 @@ import {
   ChevronLeft,
   Trash2,
   LogOut,
-  Key,
   Eye,
   EyeOff,
   Pencil,
@@ -42,6 +41,7 @@ import {
   History,
   Activity,
   Smartphone,
+  Mail,
   Globe2,
   Clock as ClockIcon,
   Users
@@ -59,6 +59,28 @@ const isVideo = (url) => {
   if (!url) return false
   const videoExtensions = ['.mp4', '.webm', '.ogg', '.mov', '.quicktime', '.m4v', '.3gp']
   return videoExtensions.some(ext => url.toLowerCase().includes(ext))
+}
+
+const isAdminUser = (user) => {
+  if (!user) return false
+
+  const adminEmails = String(process.env.NEXT_PUBLIC_ADMIN_EMAILS || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+
+  const adminPhones = String(process.env.NEXT_PUBLIC_ADMIN_PHONES || "")
+    .split(",")
+    .map((s) => s.replace(/\D/g, ""))
+    .filter(Boolean)
+
+  const email = String(user.email || "").toLowerCase()
+  const phone = String(user.user_metadata?.phone || "")
+  const phoneDigits = phone.replace(/\D/g, "")
+
+  if (email && adminEmails.includes(email)) return true
+  if (phoneDigits && adminPhones.includes(phoneDigits)) return true
+  return false
 }
 
 export default function Home() {
@@ -116,8 +138,16 @@ export default function Home() {
   }).slice(0, 15)
   
   // Auth states
-  const [inputClave, setInputClave] = useState("")
-  const [loginError, setLoginError] = useState(false)
+  const [currentUser, setCurrentUser] = useState(null)
+  const [authMode, setAuthMode] = useState("login") // 'login' | 'register'
+  const [authEmail, setAuthEmail] = useState("")
+  const [authPassword, setAuthPassword] = useState("")
+  const [registerFirstName, setRegisterFirstName] = useState("")
+  const [registerLastName, setRegisterLastName] = useState("")
+  const [registerPhone, setRegisterPhone] = useState("")
+  const [authError, setAuthError] = useState("")
+  const [authInfo, setAuthInfo] = useState("")
+  const [authLoading, setAuthLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
 
   // Modal states
@@ -135,10 +165,6 @@ export default function Home() {
   })
 
   const fileInputRef = useRef(null)
-  
-  // Keys from env
-  const SECRET_KEY = process.env.NEXT_PUBLIC_SECRET_KEY || "floriyjesusporsiempre"
-  const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_KEY || "jesus26244640"
 
   useEffect(() => {
     setIsClient(true)
@@ -149,19 +175,33 @@ export default function Home() {
       setVistas(JSON.parse(savedVistas))
     }
 
-    // Check for existing session in localStorage
-    const savedClave = localStorage.getItem("album_clave")
-    if (savedClave) {
-      verificarClave(savedClave)
-    } else {
-      // Also check URL for convenience
-      const url = new URL(window.location.href)
-      const urlClave = url.searchParams.get("clave")
-      if (urlClave) {
-        verificarClave(urlClave)
-      }
+    const initAuth = async () => {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const user = sessionData?.session?.user || null
+      setCurrentUser(user)
+      setAuthorized(Boolean(user))
+      setIsAdmin(isAdminUser(user))
     }
-  }, [SECRET_KEY, ADMIN_KEY])
+
+    initAuth()
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      const user = session?.user || null
+      setCurrentUser(user)
+      setAuthorized(Boolean(user))
+      setIsAdmin(isAdminUser(user))
+      if (!user) {
+        sessionStorage.removeItem("visita_session_id")
+        sessionStorage.removeItem("visita_session_start")
+        setSessionId(null)
+        setVistasSession(new Set())
+      }
+    })
+
+    return () => {
+      authListener?.subscription?.unsubscribe()
+    }
+  }, [])
   
   // Pausar música automáticamente al editar o generar video
   useEffect(() => {
@@ -249,7 +289,13 @@ export default function Home() {
       let currentSessionId = sessionStorage.getItem("visita_session_id");
       if (!currentSessionId) {
         const ubicacion = await getLocation();
-        const dispositivo = getDeviceModel(navigator.userAgent);
+        const deviceModel = getDeviceModel(navigator.userAgent);
+        const first = String(currentUser?.user_metadata?.first_name || "").trim()
+        const last = String(currentUser?.user_metadata?.last_name || "").trim()
+        const fullName = `${first} ${last}`.trim()
+        const phone = String(currentUser?.user_metadata?.phone || "").trim()
+        const userLabel = fullName || phone || currentUser?.email || "Usuario";
+        const dispositivo = `${userLabel} • ${deviceModel}`;
         
         const { data, error } = await supabase
           .from('visitas')
@@ -489,42 +535,109 @@ export default function Home() {
     };
   }, [selectedImage, selectedStoryIndex, showDayStoriesModal, showUploadModal, showDiarioModal, showMusicModal, trimmingFile, isGeneratingVideo]);
 
-  function verificarClave(clave) {
-    if (clave === ADMIN_KEY) {
-      setAuthorized(true)
-      setIsAdmin(true)
-      localStorage.setItem("album_clave", clave)
-      obtenerImagenes()
-      return true
-    } else if (clave === SECRET_KEY) {
-      setAuthorized(true)
-      setIsAdmin(false)
-      localStorage.setItem("album_clave", clave)
-      obtenerImagenes()
-      return true
-    }
-    return false
-  }
-
-  const handleLogin = (e) => {
+  const handleAuthSubmit = async (e) => {
     e.preventDefault()
-    if (verificarClave(inputClave)) {
-      setLoginError(false)
-    } else {
-      setLoginError(true)
-      setTimeout(() => setLoginError(false), 2000)
+    setAuthError("")
+    setAuthInfo("")
+
+    const email = String(authEmail || "").trim().toLowerCase()
+    const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    if (!ok) {
+      setAuthError("Escribe un correo válido.")
+      return
+    }
+
+    if (authPassword.length < 6) {
+      setAuthError("La contraseña debe tener al menos 6 caracteres.")
+      return
+    }
+
+    setAuthLoading(true)
+    try {
+      if (authMode === "register") {
+        const firstName = String(registerFirstName || "").trim()
+        const lastName = String(registerLastName || "").trim()
+        const phoneDigits = String(registerPhone || "").replace(/\D/g, "")
+
+        if (firstName.length < 2) {
+          setAuthError("Escribe tu nombre.")
+          return
+        }
+        if (lastName.length < 2) {
+          setAuthError("Escribe tu apellido.")
+          return
+        }
+        if (phoneDigits.length < 8) {
+          setAuthError("Escribe tu número de celular.")
+          return
+        }
+
+        const { error, data } = await supabase.auth.signUp({
+          email,
+          password: authPassword,
+          options: {
+            data: {
+              first_name: firstName,
+              last_name: lastName,
+              phone: phoneDigits
+            }
+          }
+        })
+
+        if (error) {
+          const msg = String(error.message || "").toLowerCase()
+          if (msg.includes("user already registered") || msg.includes("already registered")) {
+            setAuthMode("login")
+            setAuthInfo("Ya existe una cuenta con ese correo. Inicia sesión.")
+            return
+          }
+          throw error
+        }
+
+        if (!data?.session?.user) {
+          setAuthError("Tu Supabase todavía tiene activada la confirmación de correo. Desactívala en Authentication → Settings → Confirm email para que puedas entrar sin correo.")
+          return
+        }
+        setAuthInfo("Cuenta creada y sesión iniciada.")
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email,
+          password: authPassword
+        })
+        if (error) {
+          const msg = String(error.message || "")
+          if (msg.toLowerCase().includes("invalid login credentials")) {
+            setAuthError("Contraseña incorrecta. Si no la recuerdas y no quieres correos, borra ese usuario en Supabase (Authentication → Users) y vuelve a registrarte con una contraseña nueva.")
+            return
+          }
+          if (msg.toLowerCase().includes("email not confirmed")) {
+            setAuthError("En Supabase está activada la confirmación de correo. Desactívala en Authentication → Settings → Confirm email para que puedas entrar sin correo.")
+            return
+          }
+          throw error
+        }
+      }
+    } catch (err) {
+      setAuthError(err?.message || "No se pudo completar la autenticación.")
+    } finally {
+      setAuthLoading(false)
     }
   }
 
-  const handleLogout = () => {
-    localStorage.removeItem("album_clave")
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    sessionStorage.removeItem("visita_session_id")
+    sessionStorage.removeItem("visita_session_start")
     setAuthorized(false)
     setIsAdmin(false)
+    setCurrentUser(null)
     setImagenes([])
-    // Remove key from URL if present
-    const url = new URL(window.location.href)
-    url.searchParams.delete("clave")
-    window.history.replaceState({}, '', url)
+    setDiario([])
+    setSessionId(null)
+    setVistasSession(new Set())
+    setSelectedImage(null)
+    setSelectedStoryIndex(null)
+    setSelectedNota(null)
   }
 
   useEffect(() => {
@@ -1377,18 +1490,100 @@ export default function Home() {
             </div>
             
             <h1 className="text-3xl font-extrabold text-gray-800 mb-2">Nuestra Vida Juntos</h1>
-            <p className="text-gray-500 mb-10 text-sm">Ingresa nuestra clave secreta para ver nuestros recuerdos ❤️</p>
+            <p className="text-gray-500 mb-8 text-sm">Inicia sesión o crea una cuenta para ver nuestros recuerdos ❤️</p>
             
-            <form onSubmit={handleLogin} className="space-y-4">
+            <div className="flex bg-romantic-50/60 rounded-2xl p-1 border border-romantic-100 mb-5">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode("login")
+                  setAuthError("")
+                  setAuthInfo("")
+                }}
+                className={`flex-1 py-2.5 rounded-xl text-xs font-black transition-all ${
+                  authMode === "login" ? "bg-white text-romantic-600 shadow-sm" : "text-gray-500"
+                }`}
+              >
+                INICIAR SESIÓN
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode("register")
+                  setAuthError("")
+                  setAuthInfo("")
+                }}
+                className={`flex-1 py-2.5 rounded-xl text-xs font-black transition-all ${
+                  authMode === "register" ? "bg-white text-romantic-600 shadow-sm" : "text-gray-500"
+                }`}
+              >
+                REGISTRARME
+              </button>
+            </div>
+
+            <form onSubmit={handleAuthSubmit} className="space-y-4">
+              {authMode === "register" && (
+                <>
+                  <div className="relative group">
+                    <Users className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-romantic-300 group-focus-within:text-romantic-500 transition-colors" />
+                    <input
+                      type="text"
+                      placeholder="Nombre"
+                      value={registerFirstName}
+                      onChange={(e) => setRegisterFirstName(e.target.value)}
+                      className="w-full bg-romantic-50/50 border-2 border-romantic-100 rounded-2xl py-4 pl-12 pr-4 text-sm focus:outline-none focus:border-romantic-400 focus:bg-white transition-all"
+                      autoComplete="given-name"
+                    />
+                  </div>
+
+                  <div className="relative group">
+                    <Users className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-romantic-300 group-focus-within:text-romantic-500 transition-colors" />
+                    <input
+                      type="text"
+                      placeholder="Apellido"
+                      value={registerLastName}
+                      onChange={(e) => setRegisterLastName(e.target.value)}
+                      className="w-full bg-romantic-50/50 border-2 border-romantic-100 rounded-2xl py-4 pl-12 pr-4 text-sm focus:outline-none focus:border-romantic-400 focus:bg-white transition-all"
+                      autoComplete="family-name"
+                    />
+                  </div>
+
+                  <div className="relative group">
+                    <Smartphone className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-romantic-300 group-focus-within:text-romantic-500 transition-colors" />
+                    <input
+                      type="tel"
+                      inputMode="tel"
+                      placeholder="Celular"
+                      value={registerPhone}
+                      onChange={(e) => setRegisterPhone(e.target.value)}
+                      className="w-full bg-romantic-50/50 border-2 border-romantic-100 rounded-2xl py-4 pl-12 pr-4 text-sm focus:outline-none focus:border-romantic-400 focus:bg-white transition-all"
+                      autoComplete="tel"
+                    />
+                  </div>
+                </>
+              )}
+
               <div className="relative group">
-                <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-romantic-300 group-focus-within:text-romantic-500 transition-colors" />
-                <input 
-                  type={showPassword ? "text" : "password"}
-                  placeholder="Escribe la clave aquí..."
-                  value={inputClave}
-                  onChange={(e) => setInputClave(e.target.value)}
-                  className={`w-full bg-romantic-50/50 border-2 ${loginError ? 'border-red-300 animate-shake' : 'border-romantic-100'} rounded-2xl py-4 pl-12 pr-12 text-sm focus:outline-none focus:border-romantic-400 focus:bg-white transition-all`}
+                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-romantic-300 group-focus-within:text-romantic-500 transition-colors" />
+                <input
+                  type="email"
+                  inputMode="email"
+                  placeholder="Correo (ej: tu@correo.com)"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  className="w-full bg-romantic-50/50 border-2 border-romantic-100 rounded-2xl py-4 pl-12 pr-4 text-sm focus:outline-none focus:border-romantic-400 focus:bg-white transition-all"
                   autoFocus
+                />
+              </div>
+
+              <div className="relative group">
+                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-romantic-300 group-focus-within:text-romantic-500 transition-colors" />
+                <input
+                  type={showPassword ? "text" : "password"}
+                  placeholder="Contraseña"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  className="w-full bg-romantic-50/50 border-2 border-romantic-100 rounded-2xl py-4 pl-12 pr-12 text-sm focus:outline-none focus:border-romantic-400 focus:bg-white transition-all"
                 />
                 <button
                   type="button"
@@ -1399,24 +1594,35 @@ export default function Home() {
                 </button>
               </div>
 
-              <motion.button 
+              <motion.button
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 type="submit"
-                className="w-full bg-romantic-500 text-white py-4 rounded-2xl font-bold shadow-lg shadow-romantic-200 hover:bg-romantic-600 transition-all flex items-center justify-center gap-2"
+                disabled={authLoading}
+                className="w-full bg-romantic-500 text-white py-4 rounded-2xl font-bold shadow-lg shadow-romantic-200 hover:bg-romantic-600 transition-all flex items-center justify-center gap-2 disabled:opacity-70"
               >
-                <span>Entrar al Álbum</span>
-                <ChevronRight className="w-5 h-5" />
+                {authLoading ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <span>PROCESANDO...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>{authMode === "register" ? "CREAR CUENTA" : "ENTRAR AL ÁLBUM"}</span>
+                    <ChevronRight className="w-5 h-5" />
+                  </>
+                )}
               </motion.button>
             </form>
 
-            {loginError && (
-              <motion.p 
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="text-red-500 text-xs font-bold mt-4"
-              >
-                ¡Clave incorrecta! Inténtalo de nuevo ❤️
+            {authError && (
+              <motion.p initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="text-red-500 text-xs font-bold mt-4">
+                {authError}
+              </motion.p>
+            )}
+            {authInfo && (
+              <motion.p initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="text-romantic-600 text-xs font-bold mt-4">
+                {authInfo}
               </motion.p>
             )}
           </div>
@@ -1815,102 +2021,100 @@ export default function Home() {
             </div>
 
             {/* Gallery Grid */}
-            <div className="gallery-grid">
-              <AnimatePresence>
-                {imagenes.map((img, index) => (
-                  <motion.div
-                    key={img.id}
-                    layout
-                    initial={{ opacity: 0, scale: 0.9 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ duration: 0.4, delay: index * 0.05 }}
-                    className="gallery-item group relative overflow-hidden rounded-3xl bg-white shadow-sm hover:shadow-2xl transition-all duration-500"
-                  >
-                    <div 
-                      className="relative cursor-pointer min-h-[200px] flex items-center justify-center bg-gray-50"
-                      onClick={() => setSelectedImage(img)}
+            <div className="timeline-weave">
+              <div className="gallery-grid relative">
+                <AnimatePresence>
+                  {imagenes.map((img, index) => (
+                    <motion.div
+                      key={img.id}
+                      layout
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ duration: 0.4, delay: index * 0.05 }}
+                      className={`gallery-item timeline-card timeline-branch ${
+                        index % 2 === 0 ? "timeline-branch-left" : "timeline-branch-right"
+                      } group hover:shadow-2xl hover:shadow-romantic-100/30 transition-all duration-500`}
                     >
-                      {isVideo(img.url) ? (
-                        <div className="w-full relative">
-                          <video src={img.url} crossOrigin="anonymous" className="w-full h-auto object-cover rounded-t-3xl" />
-                          <div className="absolute inset-0 flex items-center justify-center bg-black/10 group-hover:bg-black/0 transition-all">
-                            <div className="bg-white/90 p-4 rounded-full shadow-xl transform transition-transform group-hover:scale-110">
-                              <Play className="text-romantic-500 w-8 h-8 fill-romantic-500" />
+                      <div
+                        className="relative cursor-pointer min-h-[200px] flex items-center justify-center bg-gray-50"
+                        onClick={() => setSelectedImage(img)}
+                      >
+                        {isVideo(img.url) ? (
+                          <div className="w-full relative">
+                            <video src={img.url} crossOrigin="anonymous" className="w-full h-auto object-cover" />
+                            <div className="absolute inset-0 flex items-center justify-center bg-black/10 group-hover:bg-black/0 transition-all">
+                              <div className="bg-white/90 p-4 rounded-full shadow-xl transform transition-transform group-hover:scale-110">
+                                <Play className="text-romantic-500 w-8 h-8 fill-romantic-500" />
+                              </div>
                             </div>
                           </div>
+                        ) : (
+                          <img
+                            src={img.url}
+                            crossOrigin="anonymous"
+                            className="w-full h-auto object-cover transition-transform duration-500 group-hover:scale-105"
+                            alt="Recuerdo"
+                            loading="lazy"
+                          />
+                        )}
+
+                        <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-md px-3 py-1 rounded-full shadow-sm flex items-center gap-2">
+                          <Calendar className="w-3 h-3 text-romantic-500" />
+                          <span className="text-[10px] font-bold text-gray-700">
+                            {new Date(img.fecha + "T00:00:00").toLocaleDateString("es-ES", { day: "numeric", month: "short" })}
+                          </span>
                         </div>
-                      ) : (
-                        <img 
-                          src={img.url} 
-                          crossOrigin="anonymous"
-                          className="w-full h-auto object-cover rounded-t-3xl transition-transform duration-500 group-hover:scale-105" 
-                          alt="Recuerdo"
-                          loading="lazy"
-                        />
-                      )}
-                      
-                      <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-md px-3 py-1 rounded-full shadow-sm flex items-center gap-2">
-                        <Calendar className="w-3 h-3 text-romantic-500" />
-                        <span className="text-[10px] font-bold text-gray-700">
-                          {new Date(img.fecha + "T00:00:00").toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}
-                        </span>
+
+                        {img.metadata?.audio && (
+                          <div className="absolute bottom-4 right-4 bg-white/90 backdrop-blur-md p-2.5 rounded-full shadow-md z-10">
+                            <Music className="w-4 h-4 text-romantic-500 animate-pulse" />
+                          </div>
+                        )}
+
+                        {isAdmin && (
+                          <div className="absolute top-4 right-4 flex gap-2">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setSelectedImage(img)
+                                setIsEditing(true)
+                                setEditForm({ fecha: img.fecha, ubicacion: img.ubicacion, nota: img.nota })
+                              }}
+                              className="bg-white/90 hover:bg-romantic-50 text-romantic-500 p-2.5 rounded-full shadow-lg transition-all active:scale-90"
+                              title="Editar Recuerdo"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                          </div>
+                        )}
                       </div>
 
-                      {img.metadata?.audio && (
-                        <div className="absolute bottom-4 right-4 bg-white/90 backdrop-blur-md p-2.5 rounded-full shadow-md z-10">
-                          <Music className="w-4 h-4 text-romantic-500 animate-pulse" />
-                        </div>
-                      )}
+                      <div className="p-4 bg-white">
+                        {img.ubicacion && (
+                          <div className="flex items-center gap-1.5 text-romantic-500 mb-2">
+                            <MapPin className="w-3.5 h-3.5" />
+                            <span className="text-xs font-semibold truncate">{img.ubicacion}</span>
+                          </div>
+                        )}
 
-                      {isAdmin && (
-                        <div className="absolute top-4 right-4 flex gap-2">
-                           <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setSelectedImage(img);
-                              setIsEditing(true);
-                              setEditForm({ fecha: img.fecha, ubicacion: img.ubicacion, nota: img.nota });
-                            }}
-                            className="bg-white/90 hover:bg-romantic-50 text-romantic-500 p-2.5 rounded-full shadow-lg transition-all active:scale-90"
-                            title="Editar Recuerdo"
-                          >
-                            <Pencil className="w-4 h-4" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
+                        {img.nota && (
+                          <div className="flex gap-2">
+                            <MessageSquare className="w-3.5 h-3.5 text-gray-300 shrink-0 mt-0.5" />
+                            <p className="text-gray-500 text-xs italic leading-relaxed line-clamp-3">{img.nota}</p>
+                          </div>
+                        )}
 
-                    <div className="p-4 bg-white">
-                      {img.ubicacion && (
-                        <div className="flex items-center gap-1.5 text-romantic-500 mb-2">
-                          <MapPin className="w-3.5 h-3.5" />
-                          <span className="text-xs font-semibold truncate">{img.ubicacion}</span>
-                        </div>
-                      )}
-                      
-                      {img.nota && (
-                        <div className="flex gap-2">
-                          <MessageSquare className="w-3.5 h-3.5 text-gray-300 shrink-0 mt-0.5" />
-                          <p className="text-gray-500 text-xs italic leading-relaxed line-clamp-3">
-                            {img.nota}
-                          </p>
-                        </div>
-                      )}
+                        {!img.nota && !img.ubicacion && <p className="text-gray-300 text-[10px] italic">Momento guardado con amor</p>}
 
-                      {!img.nota && !img.ubicacion && (
-                        <p className="text-gray-300 text-[10px] italic">Momento guardado con amor</p>
-                      )}
-                      
-                      <div className="mt-4 pt-3 border-t border-romantic-50 flex justify-between items-center">
-                        <span className="text-[9px] text-gray-400 uppercase tracking-tighter">
-                          {new Date(img.fecha).getFullYear()}
-                        </span>
-                        <Heart className="w-3.5 h-3.5 text-romantic-200 group-hover:text-romantic-500 group-hover:fill-romantic-500 transition-colors" />
+                        <div className="mt-4 pt-3 border-t border-romantic-50 flex justify-between items-center">
+                          <span className="text-[9px] text-gray-400 uppercase tracking-tighter">{new Date(img.fecha).getFullYear()}</span>
+                          <Heart className="w-3.5 h-3.5 text-romantic-200 group-hover:text-romantic-500 group-hover:fill-romantic-500 transition-colors" />
+                        </div>
                       </div>
-                    </div>
-                  </motion.div>
-                ))}
-              </AnimatePresence>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+              </div>
             </div>
           </>
         ) : (
