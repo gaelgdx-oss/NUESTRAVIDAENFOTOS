@@ -108,6 +108,7 @@ export default function Home() {
   const [showMusicModal, setShowMusicModal] = useState(false)
   const [activeTab, setActiveTab] = useState('album') // 'album' o 'diario'
   const [diario, setDiario] = useState([])
+  const [expandedDeviceKey, setExpandedDeviceKey] = useState(null)
   const [showDiarioModal, setShowDiarioModal] = useState(false)
   const [notaData, setNotaData] = useState({ autor: '', contenido: '' })
   const [enviandoNota, setEnviandoNota] = useState(false)
@@ -394,6 +395,77 @@ export default function Home() {
       console.warn("Estadísticas no disponibles");
     }
   }
+
+  function formatDurationSeconds(totalSeconds) {
+    const s = Math.max(0, Number(totalSeconds || 0))
+    const days = Math.floor(s / 86400)
+    const hours = Math.floor((s % 86400) / 3600)
+    const minutes = Math.floor((s % 3600) / 60)
+    const seconds = Math.floor(s % 60)
+
+    const parts = []
+    if (days) parts.push(`${days}d`)
+    if (hours || days) parts.push(`${hours}h`)
+    if (minutes || hours || days) parts.push(`${minutes}m`)
+    parts.push(`${seconds}s`)
+    return parts.join(" ")
+  }
+
+  const visitasAgrupadas = (() => {
+    const map = new Map()
+    for (const visita of todasLasVisitas) {
+      const key = String(visita?.dispositivo || "Dispositivo")
+      const item = map.get(key) || {
+        key,
+        dispositivo: key,
+        sesiones: [],
+        totalSegundos: 0,
+        ultimaActividadTs: 0,
+        ultimaActividad: null,
+        ubicacionesSet: new Set(),
+        fotosVistasSet: new Set()
+      }
+
+      item.sesiones.push(visita)
+      item.totalSegundos += Number(visita?.duracion_segundos || 0)
+
+      const ts = visita?.ultima_actividad ? new Date(visita.ultima_actividad).getTime() : 0
+      if (ts > item.ultimaActividadTs) {
+        item.ultimaActividadTs = ts
+        item.ultimaActividad = visita.ultima_actividad
+      }
+
+      if (visita?.ubicacion) item.ubicacionesSet.add(visita.ubicacion)
+      const fotos = Array.isArray(visita?.fotos_vistas) ? visita.fotos_vistas : []
+      for (const f of fotos) item.fotosVistasSet.add(f)
+
+      map.set(key, item)
+    }
+
+    return Array.from(map.values())
+      .map((g) => {
+        const sesionesOrdenadas = [...g.sesiones].sort((a, b) => {
+          const ta = a?.ultima_actividad ? new Date(a.ultima_actividad).getTime() : 0
+          const tb = b?.ultima_actividad ? new Date(b.ultima_actividad).getTime() : 0
+          return tb - ta
+        })
+        return {
+          key: g.key,
+          dispositivo: g.dispositivo,
+          ultima_actividad: g.ultimaActividad,
+          total_segundos: g.totalSegundos,
+          sesiones: sesionesOrdenadas,
+          sesiones_count: sesionesOrdenadas.length,
+          ubicaciones: Array.from(g.ubicacionesSet),
+          fotos_vistas_count: g.fotosVistasSet.size
+        }
+      })
+      .sort((a, b) => {
+        const ta = a?.ultima_actividad ? new Date(a.ultima_actividad).getTime() : 0
+        const tb = b?.ultima_actividad ? new Date(b.ultima_actividad).getTime() : 0
+        return tb - ta
+      })
+  })()
   // --- FIN ANALYTICS ---
 
   async function obtenerDiario() {
@@ -1743,13 +1815,14 @@ export default function Home() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               <AnimatePresence>
-                {todasLasVisitas.map((visita, i) => (
+                {visitasAgrupadas.map((grupo, i) => (
                   <motion.div
-                    key={visita.id}
+                    key={grupo.key}
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: i * 0.05 }}
-                    className="bg-white p-5 rounded-[28px] shadow-sm border border-romantic-50 hover:shadow-xl transition-all flex flex-col justify-between"
+                    className="bg-white p-5 rounded-[28px] shadow-sm border border-romantic-50 hover:shadow-xl transition-all flex flex-col justify-between cursor-pointer"
+                    onClick={() => setExpandedDeviceKey(expandedDeviceKey === grupo.key ? null : grupo.key)}
                   >
                     <div>
                       <div className="flex items-center gap-3 mb-4">
@@ -1757,10 +1830,22 @@ export default function Home() {
                           <Smartphone className="w-5 h-5" />
                         </div>
                         <div>
-                          <p className="text-gray-800 font-black text-sm">{visita.dispositivo}</p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-gray-800 font-black text-sm">{grupo.dispositivo}</p>
+                            <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-romantic-50 text-romantic-600 border border-romantic-100">
+                              {grupo.sesiones_count} {grupo.sesiones_count === 1 ? "sesión" : "sesiones"}
+                            </span>
+                            <ChevronRight className={`w-4 h-4 text-romantic-300 transition-transform ${expandedDeviceKey === grupo.key ? "rotate-90" : ""}`} />
+                          </div>
                           <div className="flex items-center gap-1.5 text-romantic-400 text-[10px] font-bold mt-0.5 uppercase">
                             <MapPin className="w-3 h-3" />
-                            <span>{visita.ubicacion}</span>
+                            <span>
+                              {grupo.ubicaciones.length === 0
+                                ? "SIN UBICACIÓN"
+                                : grupo.ubicaciones.length === 1
+                                  ? grupo.ubicaciones[0]
+                                  : `${grupo.ubicaciones.length} UBICACIONES`}
+                            </span>
                           </div>
                         </div>
                       </div>
@@ -1768,17 +1853,56 @@ export default function Home() {
                       <div className="space-y-2 mt-4 bg-gray-50 p-3 rounded-2xl">
                         <div className="flex justify-between items-center text-xs">
                           <span className="text-gray-500 font-medium flex items-center gap-1"><ClockIcon className="w-3 h-3"/> Última vez</span>
-                          <span className="font-bold text-gray-700">{new Date(visita.ultima_actividad).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+                          <span className="font-bold text-gray-700">
+                            {grupo.ultima_actividad
+                              ? new Date(grupo.ultima_actividad).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+                              : "-"}
+                          </span>
                         </div>
                         <div className="flex justify-between items-center text-xs">
                           <span className="text-gray-500 font-medium flex items-center gap-1"><History className="w-3 h-3"/> Tiempo total</span>
-                          <span className="font-bold text-gray-700">{Math.floor(visita.duracion_segundos / 60)}m {visita.duracion_segundos % 60}s</span>
+                          <span className="font-bold text-gray-700">{formatDurationSeconds(grupo.total_segundos)}</span>
                         </div>
                         <div className="flex justify-between items-center text-xs">
                           <span className="text-gray-500 font-medium flex items-center gap-1"><ImageIcon className="w-3 h-3"/> Fotos vistas</span>
-                          <span className="font-bold text-gray-700">{visita.fotos_vistas?.length || 0}</span>
+                          <span className="font-bold text-gray-700">{grupo.fotos_vistas_count}</span>
                         </div>
                       </div>
+
+                      <AnimatePresence>
+                        {expandedDeviceKey === grupo.key && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: "auto", opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="mt-4 space-y-2">
+                              {grupo.sesiones.map((sesion) => (
+                                <div key={sesion.id} className="bg-white border border-romantic-100 rounded-2xl p-3">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <div className="flex items-center gap-1.5 text-romantic-400 text-[10px] font-black uppercase">
+                                        <MapPin className="w-3 h-3" />
+                                        <span className="truncate">{sesion.ubicacion || "SIN UBICACIÓN"}</span>
+                                      </div>
+                                      <p className="text-gray-600 text-xs font-bold mt-1">
+                                        {sesion.ultima_actividad
+                                          ? new Date(sesion.ultima_actividad).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+                                          : "-"}
+                                      </p>
+                                    </div>
+                                    <div className="text-right shrink-0">
+                                      <p className="text-gray-800 text-xs font-black">{formatDurationSeconds(sesion.duracion_segundos)}</p>
+                                      <p className="text-gray-400 text-[10px] font-bold mt-1">{(sesion.fotos_vistas?.length || 0)} fotos</p>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
                   </motion.div>
                 ))}
