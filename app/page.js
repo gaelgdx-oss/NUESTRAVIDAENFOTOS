@@ -83,12 +83,37 @@ const isAdminUser = (user) => {
   return false
 }
 
+const isNativePlatform = () => {
+  const cap = globalThis?.Capacitor
+  if (!cap) return false
+  if (typeof cap.isNativePlatform === "function") return Boolean(cap.isNativePlatform())
+  if (typeof cap.getPlatform === "function") return cap.getPlatform() !== "web"
+  return false
+}
+
+const withTimeout = async (promise, ms, label) => {
+  let timerId
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timerId = setTimeout(() => {
+          reject(new Error(`${label} tardó demasiado. Revisa tu internet o prueba con un archivo más pequeño.`))
+        }, ms)
+      }),
+    ])
+  } finally {
+    if (timerId) clearTimeout(timerId)
+  }
+}
+
 export default function Home() {
   const [imagenes, setImagenes] = useState([])
   const [authorized, setAuthorized] = useState(false)
   const [isAdmin, setIsAdmin] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [isClient, setIsClient] = useState(false)
+  const [authReady, setAuthReady] = useState(false)
   const [recuerdoDelDia, setRecuerdoDelDia] = useState(null)
   const [selectedStoryIndex, setSelectedStoryIndex] = useState(null)
   const [selectedImage, setSelectedImage] = useState(null)
@@ -98,6 +123,7 @@ export default function Home() {
   const [updating, setUpdating] = useState(false)
   const [vistas, setVistas] = useState([])
   const [uploadProgress, setUploadProgress] = useState(0)
+  const [uploadStatus, setUploadStatus] = useState("")
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false)
   const [videoProgress, setVideoProgress] = useState(0)
   const [generatedVideoBlob, setGeneratedVideoBlob] = useState(null)
@@ -129,14 +155,14 @@ export default function Home() {
   const [showDayStoriesModal, setShowDayStoriesModal] = useState(false)
   const [currentDayStoryIdx, setCurrentDayStoryIdx] = useState(0)
   
-  // Sort stories: NEW UNSEEN FIRST, then chronologically
-  const historiasOrdenadas = [...imagenes].sort((a, b) => {
-    const aVista = vistas.includes(a.id)
-    const bVista = vistas.includes(b.id)
-    if (!aVista && bVista) return -1
-    if (aVista && !bVista) return 1
-    return new Date(b.fecha) - new Date(a.fecha)
-  }).slice(0, 15)
+  // Sort stories: newest first (keep "vista" only for styling)
+  const historiasOrdenadas = [...imagenes]
+    .sort((a, b) => {
+      const ta = a?.created_at ? new Date(a.created_at).getTime() : new Date(a.fecha).getTime()
+      const tb = b?.created_at ? new Date(b.created_at).getTime() : new Date(b.fecha).getTime()
+      return tb - ta
+    })
+    .slice(0, 15)
   
   // Auth states
   const [currentUser, setCurrentUser] = useState(null)
@@ -150,6 +176,7 @@ export default function Home() {
   const [authInfo, setAuthInfo] = useState("")
   const [authLoading, setAuthLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false)
 
   // Modal states
   const [showUploadModal, setShowUploadModal] = useState(false)
@@ -176,17 +203,7 @@ export default function Home() {
       setVistas(JSON.parse(savedVistas))
     }
 
-    const initAuth = async () => {
-      const { data: sessionData } = await supabase.auth.getSession()
-      const user = sessionData?.session?.user || null
-      setCurrentUser(user)
-      setAuthorized(Boolean(user))
-      setIsAdmin(isAdminUser(user))
-    }
-
-    initAuth()
-
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const applySessionState = (session) => {
       const user = session?.user || null
       setCurrentUser(user)
       setAuthorized(Boolean(user))
@@ -197,6 +214,30 @@ export default function Home() {
         setSessionId(null)
         setVistasSession(new Set())
       }
+    }
+
+    const initAuth = async () => {
+      try {
+        const { data: sessionData } = await supabase.auth.getSession()
+        applySessionState(sessionData?.session || null)
+      } finally {
+        setAuthReady(true)
+      }
+    }
+
+    initAuth()
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "INITIAL_SESSION") {
+        if (session?.user) {
+          applySessionState(session)
+          setAuthReady(true)
+        }
+        return
+      }
+
+      applySessionState(session)
+      setAuthReady(true)
     })
 
     return () => {
@@ -520,6 +561,143 @@ export default function Home() {
   }, [authorized])
 
   useEffect(() => {
+    if (!authorized) return
+
+    let intervalId
+    const run = () => {
+      Promise.allSettled([
+        obtenerImagenes(),
+        obtenerDiario(),
+        activeTab === "estadisticas" ? cargarEstadisticas() : Promise.resolve(),
+      ]).catch(() => {})
+    }
+
+    intervalId = setInterval(run, 5 * 60 * 1000)
+
+    let removeAppListener
+    ;(async () => {
+      if (!isNativePlatform()) return
+      try {
+        const mod = await import("@capacitor/app")
+        const App = mod?.App
+        if (!App?.addListener) return
+        const handler = App.addListener("appStateChange", ({ isActive }) => {
+          if (isActive) run()
+        })
+        removeAppListener = () => handler?.remove?.()
+      } catch (_e) {}
+    })()
+
+    return () => {
+      if (intervalId) clearInterval(intervalId)
+      if (removeAppListener) removeAppListener()
+    }
+  }, [authorized, activeTab])
+
+  useEffect(() => {
+    if (!authorized) return
+    ;(async () => {
+      if (!isNativePlatform()) return
+      try {
+        const { LocalNotifications } = await import("@capacitor/local-notifications")
+        if (!LocalNotifications?.requestPermissions) return
+        const perm = await LocalNotifications.requestPermissions()
+        setNotificationsEnabled(perm?.display === "granted")
+      } catch (_e) {}
+    })()
+  }, [authorized])
+
+  useEffect(() => {
+    if (!authorized) return
+
+    const channel = supabase
+      .channel("album-realtime")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "fotos" },
+        async (payload) => {
+          const row = payload?.new
+          if (row?.id) {
+            setImagenes((prev) => {
+              const next = [row, ...prev]
+              const seen = new Set()
+              return next.filter((x) => {
+                if (!x?.id) return false
+                if (seen.has(x.id)) return false
+                seen.add(x.id)
+                return true
+              })
+            })
+          } else {
+            await obtenerImagenes()
+          }
+
+          if (isNativePlatform()) {
+            try {
+              const { LocalNotifications } = await import("@capacitor/local-notifications")
+              if (notificationsEnabled) {
+                await LocalNotifications.schedule({
+                  notifications: [
+                    {
+                      id: Date.now(),
+                      title: "Nuevo recuerdo ❤️",
+                      body: "Se subió una nueva foto al álbum",
+                      schedule: { at: new Date(Date.now() + 200) },
+                    },
+                  ],
+                })
+              }
+            } catch (_e) {}
+          }
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "diario" },
+        async (payload) => {
+          const row = payload?.new
+          if (row?.id) {
+            setDiario((prev) => {
+              const next = [row, ...prev]
+              const seen = new Set()
+              return next.filter((x) => {
+                if (!x?.id) return false
+                if (seen.has(x.id)) return false
+                seen.add(x.id)
+                return true
+              })
+            })
+          } else {
+            await obtenerDiario()
+          }
+
+          if (isNativePlatform()) {
+            try {
+              const { LocalNotifications } = await import("@capacitor/local-notifications")
+              if (notificationsEnabled) {
+                await LocalNotifications.schedule({
+                  notifications: [
+                    {
+                      id: Date.now(),
+                      title: "Nueva nota ❤️",
+                      body: "Se escribió una nueva nota en el diario",
+                      schedule: { at: new Date(Date.now() + 200) },
+                    },
+                  ],
+                })
+              }
+            } catch (_e) {}
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [authorized, notificationsEnabled])
+
+  useEffect(() => {
     if (selectedImage) {
       setEditForm({ 
         fecha: selectedImage.fecha, 
@@ -742,6 +920,7 @@ export default function Home() {
         .from("fotos")
         .select("*")
         .order("fecha", { ascending: false })
+        .order("created_at", { ascending: false })
 
       if (error) throw error
       // Asegurarnos de que las fechas sean correctas y añadir created_at si existe para 'esNueva'
@@ -848,19 +1027,35 @@ export default function Home() {
     setUploading(true)
     
     try {
+      setUploadProgress(0)
+      setUploadStatus(selectedAudioFile ? "Subiendo música..." : "Preparando tu recuerdo...")
       let finalMetadata = trimData ? { trim: trimData } : {}
+      const totalSteps = (selectedAudioFile ? 1 : 0) + selectedFiles.length * 2
+      let completedSteps = 0
+      const bumpProgress = () => {
+        if (!totalSteps) return
+        completedSteps += 1
+        const pct = Math.max(0, Math.min(100, Math.round((completedSteps / totalSteps) * 100)))
+        setUploadProgress(pct)
+      }
       
       // 1. Upload audio ONCE if present for this batch
       if (selectedAudioFile) {
-        setUploadProgress(10) // Small start progress
         const audioExt = selectedAudioFile.name.split('.').pop()
         const audioName = `musica/${Date.now()}-${Math.random().toString(36).substring(2, 7)}.${audioExt}`
         
-        const { error: audioError } = await supabase.storage
-          .from("fotos")
-          .upload(audioName, selectedAudioFile)
+        const { error: audioError } = await withTimeout(
+          supabase.storage
+            .from("fotos")
+            .upload(audioName, selectedAudioFile, {
+              contentType: selectedAudioFile.type || undefined
+            }),
+          180000,
+          "La subida de la música"
+        )
         
         if (audioError) throw audioError
+        bumpProgress()
         
         const { data: { publicUrl: audioUrl } } = supabase.storage
           .from("fotos")
@@ -874,33 +1069,47 @@ export default function Home() {
       }
 
       // 2. Upload images loop
-      for (const file of selectedFiles) {
+      const native = isNativePlatform()
+      for (let idx = 0; idx < selectedFiles.length; idx++) {
+        const file = selectedFiles[idx]
+        const kind = isVideo(file.name) ? "video" : "foto"
         let fileToUpload = file
         
         // Compress if it's an image
         if (!isVideo(file.name) && file.type.startsWith('image/')) {
-          fileToUpload = await compressImage(file)
+          if (!native) {
+            setUploadStatus(`Procesando ${kind} ${idx + 1}/${selectedFiles.length}...`)
+            try {
+              fileToUpload = await withTimeout(compressImage(file), 60000, "El procesamiento de la foto")
+            } catch (_err) {
+              fileToUpload = file
+            }
+          }
         }
 
         const fileExt = fileToUpload.name.split('.').pop()
         const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 7)}.${fileExt}`
         
-        const { error: uploadError } = await supabase.storage
-          .from("fotos")
-          .upload(fileName, fileToUpload, {
-            onUploadProgress: (progress) => {
-              const percent = (progress.loaded / progress.total) * 100
-              setUploadProgress(Math.round(percent))
-            }
-          })
+        setUploadStatus(`Subiendo ${kind} ${idx + 1}/${selectedFiles.length}...`)
+        const { error: uploadError } = await withTimeout(
+          supabase.storage
+            .from("fotos")
+            .upload(fileName, fileToUpload, {
+              contentType: fileToUpload.type || undefined
+            }),
+          180000,
+          "La subida de la foto"
+        )
 
         if (uploadError) throw uploadError
+        bumpProgress()
 
         const { data: { publicUrl } } = supabase.storage
           .from("fotos")
           .getPublicUrl(fileName)
 
-        const { error: dbError } = await supabase
+        setUploadStatus("Guardando detalles...")
+        const { data: insertedRow, error: dbError } = await supabase
           .from("fotos")
           .insert([{ 
             url: publicUrl, 
@@ -910,8 +1119,24 @@ export default function Home() {
             nota: uploadData.nota,
             metadata: Object.keys(finalMetadata).length > 0 ? finalMetadata : null
           }])
+          .select("*")
+          .single()
 
         if (dbError) throw dbError
+        bumpProgress()
+
+        if (insertedRow?.id) {
+          setImagenes((prev) => {
+            const next = [insertedRow, ...prev]
+            const seen = new Set()
+            return next.filter((x) => {
+              if (!x?.id) return false
+              if (seen.has(x.id)) return false
+              seen.add(x.id)
+              return true
+            })
+          })
+        }
       }
 
       confetti({
@@ -924,6 +1149,7 @@ export default function Home() {
       setShowUploadModal(false)
       setSelectedFiles([])
       setUploadProgress(0)
+      setUploadStatus("")
       setSelectedAudioFile(null)
       setAudioTrimData(null)
       setTrimData(null)
@@ -934,7 +1160,9 @@ export default function Home() {
       })
       obtenerImagenes()
     } catch (err) {
-      alert("Error al subir: " + err.message)
+      console.error("Upload error:", err)
+      setUploadStatus("")
+      alert("Error al subir: " + (err?.message || String(err)))
     } finally {
       setUploading(false)
     }
@@ -1538,6 +1766,30 @@ export default function Home() {
   }
 
   if (!isClient) return null
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-romantic-50 p-6 text-center">
+        <HeartRain />
+        <div className="bg-white p-10 rounded-[40px] shadow-2xl max-w-md w-full border border-romantic-100 relative overflow-hidden">
+          <div className="absolute -top-6 -right-6 text-romantic-100 rotate-12">
+            <Heart className="w-24 h-24 fill-current" />
+          </div>
+          <div className="absolute -bottom-10 -left-10 text-romantic-50 -rotate-12">
+            <Heart className="w-32 h-32 fill-current" />
+          </div>
+
+          <div className="relative z-10">
+            <div className="bg-romantic-100 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6 shadow-inner">
+              <Loader2 className="text-romantic-500 w-10 h-10 animate-spin" />
+            </div>
+            <h1 className="text-2xl font-extrabold text-gray-800 mb-2">Nuestra Vida Juntos</h1>
+            <p className="text-gray-500 text-sm font-medium">Cargando tu sesión...</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   if (!authorized) {
     return (
@@ -2540,7 +2792,7 @@ export default function Home() {
                       <input 
                         type="date" 
                         value={uploadData.fecha}
-                        onChange={(e) => setUploadData({...uploadData, fecha: e.target.value})}
+                        onChange={(e) => setUploadData((prev) => ({ ...prev, fecha: e.target.value }))}
                         className="w-full bg-gray-50 border-none rounded-2xl py-3 pl-11 pr-4 text-sm focus:ring-2 focus:ring-romantic-300"
                       />
                     </div>
@@ -2554,7 +2806,7 @@ export default function Home() {
                         type="text" 
                         placeholder="Ej: Nuestra primera cita, En la playa..."
                         value={uploadData.ubicacion}
-                        onChange={(e) => setUploadData({...uploadData, ubicacion: e.target.value})}
+                        onChange={(e) => setUploadData((prev) => ({ ...prev, ubicacion: e.target.value }))}
                         className="w-full bg-gray-50 border-none rounded-2xl py-3 pl-11 pr-4 text-sm focus:ring-2 focus:ring-romantic-300"
                       />
                     </div>
@@ -2567,7 +2819,7 @@ export default function Home() {
                       <textarea 
                         placeholder="Escribe algo que nunca quieras olvidar..."
                         value={uploadData.nota}
-                        onChange={(e) => setUploadData({...uploadData, nota: e.target.value})}
+                        onChange={(e) => setUploadData((prev) => ({ ...prev, nota: e.target.value }))}
                         className="w-full bg-gray-50 border-none rounded-2xl py-3 pl-11 pr-4 text-sm focus:ring-2 focus:ring-romantic-300 min-h-[100px] resize-none"
                       />
                     </div>
@@ -2619,7 +2871,7 @@ export default function Home() {
                     <>
                       <div className="flex items-center gap-2">
                         <Loader2 className="w-5 h-5 animate-spin" />
-                        <span>Guardando para siempre...</span>
+                        <span>{uploadStatus || "Guardando para siempre..."}</span>
                       </div>
                       <div className="w-full max-w-[200px] h-1 bg-white/30 rounded-full mt-2 overflow-hidden px-4">
                         <motion.div 
