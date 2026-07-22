@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react"
 import MusicPicker from "./MusicPicker"
-import { createBulkItem } from "@/lib/parseFechaFromName"
+import { createBulkItem, formatFechaEs } from "@/lib/parseFechaFromName"
 
 const isVideoName = (name) => {
   if (!name) return false
@@ -200,12 +200,13 @@ export default function BulkUploadModal({
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div className="space-y-1">
                         <label className="text-[10px] font-bold text-romantic-400 uppercase ml-1 tracking-wider">
-                          Fecha (del nombre)
+                          Fecha (DD-MM-AAAA del nombre)
                         </label>
                         <div className="relative">
                           <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                           <input
                             type="date"
+                            lang="es"
                             disabled={uploading}
                             value={item.fecha}
                             onChange={(e) =>
@@ -214,6 +215,12 @@ export default function BulkUploadModal({
                             className="w-full bg-white border-none rounded-xl py-2.5 pl-10 pr-3 text-sm focus:ring-2 focus:ring-romantic-300"
                           />
                         </div>
+                        <p className="text-[11px] font-bold text-romantic-600 ml-1">
+                          Se guarda: {formatFechaEs(item.fecha) || "—"}
+                        </p>
+                        <p className="text-[10px] text-gray-400 ml-1">
+                          El nombre usa día-mes-año. Ej: 01-02-2026 = 1 de febrero.
+                        </p>
                       </div>
                       <div className="space-y-1">
                         <label className="text-[10px] font-bold text-romantic-400 uppercase ml-1 tracking-wider">
