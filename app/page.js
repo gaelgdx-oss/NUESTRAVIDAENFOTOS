@@ -53,7 +53,9 @@ import confetti from "canvas-confetti"
 import HeartRain from "@/components/HeartRain"
 import VideoPlayer from "@/components/VideoPlayer"
 import VideoTrimmer from "@/components/VideoTrimmer"
-import MusicSelector from "@/components/MusicSelector"
+import MusicPicker from "@/components/MusicPicker"
+import BulkUploadModal from "@/components/BulkUploadModal"
+import YouTubeAudioPlayer, { isYouTubeAudio } from "@/components/YouTubeAudioPlayer"
 
 const isVideo = (url) => {
   if (!url) return false
@@ -124,6 +126,9 @@ export default function Home() {
   const [vistas, setVistas] = useState([])
   const [uploadProgress, setUploadProgress] = useState(0)
   const [uploadStatus, setUploadStatus] = useState("")
+  const [downloadProgress, setDownloadProgress] = useState(0)
+  const [downloadStatus, setDownloadStatus] = useState("")
+  const [downloadingAll, setDownloadingAll] = useState(false)
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false)
   const [videoProgress, setVideoProgress] = useState(0)
   const [generatedVideoBlob, setGeneratedVideoBlob] = useState(null)
@@ -131,6 +136,7 @@ export default function Home() {
   const [trimData, setTrimData] = useState(null) // { startTime, endTime }
   const [selectedAudioFile, setSelectedAudioFile] = useState(null)
   const [audioTrimData, setAudioTrimData] = useState(null)
+  const [youtubeEditAudio, setYoutubeEditAudio] = useState(null)
   const [showMusicModal, setShowMusicModal] = useState(false)
   const [activeTab, setActiveTab] = useState('album') // 'album' o 'diario'
   const [diario, setDiario] = useState([])
@@ -148,7 +154,6 @@ export default function Home() {
   const [visitasFoto, setVisitasFoto] = useState([])
   
   const audioRef = useRef(null)
-  const musicInputRef = useRef(null)
   
   // Historias destacadas del día (cerca de la fecha actual de años anteriores)
   const [historiasDelDia, setHistoriasDelDia] = useState([])
@@ -716,40 +721,45 @@ export default function Home() {
   }, [imagenes, recuerdoDelDia])
 
   useEffect(() => {
-    if (selectedImage && selectedImage.metadata?.audio) {
-      if (audioRef.current) {
-        audioRef.current.src = selectedImage.metadata.audio.url
-        audioRef.current.currentTime = selectedImage.metadata.audio.startTime
-        audioRef.current.play().catch(e => console.log("Auto-play prevented"))
-        
-        const checkEnd = setInterval(() => {
-          if (audioRef.current && audioRef.current.currentTime >= selectedImage.metadata.audio.startTime + 30) {
-            audioRef.current.pause()
-            audioRef.current.currentTime = selectedImage.metadata.audio.startTime
-            audioRef.current.play()
-          }
-        }, 1000)
-        return () => clearInterval(checkEnd)
-      }
-    } else {
+    const audioMeta = selectedImage?.metadata?.audio
+    if (!audioMeta || isYouTubeAudio(audioMeta)) {
       if (audioRef.current) audioRef.current.pause()
+      return
+    }
+    if (audioRef.current && audioMeta.url) {
+      audioRef.current.src = audioMeta.url
+      audioRef.current.currentTime = audioMeta.startTime || 0
+      audioRef.current.play().catch(() => {})
+
+      const checkEnd = setInterval(() => {
+        if (
+          audioRef.current &&
+          audioRef.current.currentTime >= (audioMeta.startTime || 0) + 30
+        ) {
+          audioRef.current.pause()
+          audioRef.current.currentTime = audioMeta.startTime || 0
+          audioRef.current.play().catch(() => {})
+        }
+      }, 1000)
+      return () => clearInterval(checkEnd)
     }
   }, [selectedImage])
 
   useEffect(() => {
     if (selectedStoryIndex !== null) {
       const story = historiasOrdenadas[selectedStoryIndex]
-      if (story.metadata?.audio) {
-        if (audioRef.current) {
-          audioRef.current.src = story.metadata.audio.url
-          audioRef.current.currentTime = story.metadata.audio.startTime
-          audioRef.current.play().catch(e => console.log("Auto-play prevented"))
-        }
-      } else {
+      const audioMeta = story?.metadata?.audio
+      if (!audioMeta || isYouTubeAudio(audioMeta)) {
         if (audioRef.current) audioRef.current.pause()
+        return
       }
-    } else {
-      if (audioRef.current) audioRef.current.pause()
+      if (audioRef.current && audioMeta.url) {
+        audioRef.current.src = audioMeta.url
+        audioRef.current.currentTime = audioMeta.startTime || 0
+        audioRef.current.play().catch(() => {})
+      }
+    } else if (audioRef.current) {
+      audioRef.current.pause()
     }
   }, [selectedStoryIndex])
 
@@ -762,6 +772,7 @@ export default function Home() {
                        showUploadModal || 
                        showDiarioModal || 
                        showMusicModal ||
+                       downloadingAll ||
                        trimmingFile !== null ||
                        isGeneratingVideo;
     
@@ -783,7 +794,7 @@ export default function Home() {
       document.documentElement.style.overflow = '';
       document.documentElement.style.overscrollBehavior = '';
     };
-  }, [selectedImage, selectedStoryIndex, showDayStoriesModal, showUploadModal, showDiarioModal, showMusicModal, trimmingFile, isGeneratingVideo]);
+  }, [selectedImage, selectedStoryIndex, showDayStoriesModal, showUploadModal, showDiarioModal, showMusicModal, trimmingFile, isGeneratingVideo, downloadingAll]);
 
   const handleAuthSubmit = async (e) => {
     e.preventDefault()
@@ -959,16 +970,19 @@ export default function Home() {
   }
 
   const handleFileChange = (e) => {
-    const files = Array.from(e.target.files)
-    if (files.length > 0) {
-      const file = files[0]
-      if (isVideo(file.name)) {
-        setTrimmingFile(file)
-      } else {
-        setSelectedFiles(files)
-        setShowUploadModal(true)
-      }
+    const files = Array.from(e.target.files || [])
+    e.target.value = ""
+    if (files.length === 0) return
+
+    // Un solo video: mantener recorte; varios archivos (fotos/videos) → modal masivo
+    if (files.length === 1 && isVideo(files[0].name)) {
+      setTrimmingFile(files[0])
+      return
     }
+
+    setTrimData(null)
+    setSelectedFiles(files)
+    setShowUploadModal(true)
   }
 
   const handleConfirmTrim = (data) => {
@@ -1015,156 +1029,214 @@ export default function Home() {
     })
   }
 
-  async function subirImagenes() {
-    if (selectedFiles.length === 0) return
-    
-    // Check for large videos (> 50MB)
-    const largeVideos = selectedFiles.filter(f => isVideo(f.name) && f.size > 50 * 1024 * 1024)
+  async function subirImagenes(bulkItems) {
+    const items = Array.isArray(bulkItems) ? bulkItems : []
+    if (items.length === 0) return
+
+    const largeVideos = items.filter(
+      (it) => isVideo(it.file?.name) && it.file?.size > 50 * 1024 * 1024
+    )
     if (largeVideos.length > 0) {
-      if (!confirm(`Has seleccionado ${largeVideos.length} video(s) muy grandes (más de 50MB). El almacenamiento gratuito de Supabase tiene un límite y podrían no subirse o tardar mucho. ¿Deseas intentarlo de todas formas? 😅`)) return
+      if (
+        !confirm(
+          `Has seleccionado ${largeVideos.length} video(s) muy grandes (más de 50MB). El almacenamiento gratuito de Supabase tiene un límite y podrían no subirse o tardar mucho. ¿Deseas intentarlo de todas formas?`
+        )
+      ) {
+        return
+      }
     }
 
     setUploading(true)
-    
-    try {
-      setUploadProgress(0)
-      setUploadStatus(selectedAudioFile ? "Subiendo música..." : "Preparando tu recuerdo...")
-      let finalMetadata = trimData ? { trim: trimData } : {}
-      const totalSteps = (selectedAudioFile ? 1 : 0) + selectedFiles.length * 2
-      let completedSteps = 0
-      const bumpProgress = () => {
-        if (!totalSteps) return
-        completedSteps += 1
-        const pct = Math.max(0, Math.min(100, Math.round((completedSteps / totalSteps) * 100)))
-        setUploadProgress(pct)
-      }
-      
-      // 1. Upload audio ONCE if present for this batch
-      if (selectedAudioFile) {
-        const audioExt = selectedAudioFile.name.split('.').pop()
-        const audioName = `musica/${Date.now()}-${Math.random().toString(36).substring(2, 7)}.${audioExt}`
-        
-        const { error: audioError } = await withTimeout(
-          supabase.storage
-            .from("fotos")
-            .upload(audioName, selectedAudioFile, {
-              contentType: selectedAudioFile.type || undefined
-            }),
-          180000,
-          "La subida de la música"
-        )
-        
-        if (audioError) throw audioError
-        bumpProgress()
-        
-        const { data: { publicUrl: audioUrl } } = supabase.storage
-          .from("fotos")
-          .getPublicUrl(audioName)
-          
-        finalMetadata.audio = {
-          url: audioUrl,
-          name: selectedAudioFile.name.replace(/\.[^/.]+$/, ""),
-          startTime: audioTrimData?.startTime || 0
-        }
-      }
+    setUploadProgress(0)
+    setUploadStatus("Preparando tu lote...")
 
-      // 2. Upload images loop
-      const native = isNativePlatform()
-      for (let idx = 0; idx < selectedFiles.length; idx++) {
-        const file = selectedFiles[idx]
-        const kind = isVideo(file.name) ? "video" : "foto"
-        let fileToUpload = file
-        
-        // Compress if it's an image
-        if (!isVideo(file.name) && file.type.startsWith('image/')) {
-          if (!native) {
-            setUploadStatus(`Procesando ${kind} ${idx + 1}/${selectedFiles.length}...`)
-            try {
-              fileToUpload = await withTimeout(compressImage(file), 60000, "El procesamiento de la foto")
-            } catch (_err) {
-              fileToUpload = file
+    const totalSteps = items.reduce(
+      (sum, it) => sum + 2 + (it.audioMode === "local" && it.localAudioFile ? 1 : 0),
+      0
+    )
+    let completedSteps = 0
+    const bumpProgress = () => {
+      if (!totalSteps) return
+      completedSteps += 1
+      setUploadProgress(
+        Math.max(0, Math.min(100, Math.round((completedSteps / totalSteps) * 100)))
+      )
+    }
+
+    const failed = []
+    const native = isNativePlatform()
+
+    try {
+      for (let idx = 0; idx < items.length; idx++) {
+        const item = items[idx]
+        const file = item.file
+        const label = file?.name || `archivo ${idx + 1}`
+
+        try {
+          let metadata = {}
+          if (item.trim) {
+            const { blob, ...trimRest } = item.trim
+            metadata.trim = trimRest
+          } else if (trimData && items.length === 1) {
+            const { blob, ...trimRest } = trimData
+            metadata.trim = trimRest
+          }
+
+          if (item.audioMode === "local" && item.localAudioFile) {
+            setUploadStatus(
+              `Subiendo música ${idx + 1}/${items.length} — ${item.localAudioFile.name}`
+            )
+            const audioExt = item.localAudioFile.name.split(".").pop()
+            const audioName = `musica/${Date.now()}-${Math.random().toString(36).substring(2, 7)}.${audioExt}`
+            const { error: audioError } = await withTimeout(
+              supabase.storage.from("fotos").upload(audioName, item.localAudioFile, {
+                contentType: item.localAudioFile.type || undefined,
+              }),
+              180000,
+              "La subida de la música"
+            )
+            if (audioError) throw audioError
+            bumpProgress()
+            const {
+              data: { publicUrl: audioUrl },
+            } = supabase.storage.from("fotos").getPublicUrl(audioName)
+            metadata.audio = {
+              source: "local",
+              url: audioUrl,
+              name: item.localAudioFile.name.replace(/\.[^/.]+$/, ""),
+              startTime: item.audioTrim?.startTime || 0,
+            }
+          } else if (item.audioMode === "youtube" && item.youtube?.videoId) {
+            metadata.audio = {
+              source: "youtube",
+              videoId: item.youtube.videoId,
+              name: item.youtube.title || "YouTube",
+              thumbnail: item.youtube.thumbnail || "",
+              startTime: item.youtube.startTime || item.audioTrim?.startTime || 0,
             }
           }
-        }
 
-        const fileExt = fileToUpload.name.split('.').pop()
-        const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 7)}.${fileExt}`
-        
-        setUploadStatus(`Subiendo ${kind} ${idx + 1}/${selectedFiles.length}...`)
-        const { error: uploadError } = await withTimeout(
-          supabase.storage
-            .from("fotos")
-            .upload(fileName, fileToUpload, {
-              contentType: fileToUpload.type || undefined
+          let fileToUpload = file
+          const kind = isVideo(file.name) ? "video" : "foto"
+          if (!isVideo(file.name) && file.type?.startsWith("image/")) {
+            if (!native) {
+              setUploadStatus(`Procesando ${kind} ${idx + 1}/${items.length} — ${label}`)
+              try {
+                fileToUpload = await withTimeout(
+                  compressImage(file),
+                  60000,
+                  "El procesamiento de la foto"
+                )
+              } catch (_err) {
+                fileToUpload = file
+              }
+            }
+          }
+
+          const fileExt = fileToUpload.name.split(".").pop()
+          const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 7)}.${fileExt}`
+          setUploadStatus(`Subiendo ${kind} ${idx + 1}/${items.length} — ${label}`)
+          const { error: uploadError } = await withTimeout(
+            supabase.storage.from("fotos").upload(fileName, fileToUpload, {
+              contentType: fileToUpload.type || undefined,
             }),
-          180000,
-          "La subida de la foto"
-        )
+            180000,
+            "La subida de la foto"
+          )
+          if (uploadError) throw uploadError
+          bumpProgress()
 
-        if (uploadError) throw uploadError
-        bumpProgress()
+          const {
+            data: { publicUrl },
+          } = supabase.storage.from("fotos").getPublicUrl(fileName)
 
-        const { data: { publicUrl } } = supabase.storage
-          .from("fotos")
-          .getPublicUrl(fileName)
+          setUploadStatus(`Guardando detalles ${idx + 1}/${items.length}...`)
+          const { data: insertedRow, error: dbError } = await supabase
+            .from("fotos")
+            .insert([
+              {
+                url: publicUrl,
+                name: file.name,
+                fecha: item.fecha,
+                ubicacion: item.ubicacion || "",
+                nota: item.nota || "",
+                metadata: Object.keys(metadata).length > 0 ? metadata : null,
+              },
+            ])
+            .select("*")
+            .single()
 
-        setUploadStatus("Guardando detalles...")
-        const { data: insertedRow, error: dbError } = await supabase
-          .from("fotos")
-          .insert([{ 
-            url: publicUrl, 
-            name: file.name,
-            fecha: uploadData.fecha,
-            ubicacion: uploadData.ubicacion,
-            nota: uploadData.nota,
-            metadata: Object.keys(finalMetadata).length > 0 ? finalMetadata : null
-          }])
-          .select("*")
-          .single()
+          if (dbError) throw dbError
+          bumpProgress()
 
-        if (dbError) throw dbError
-        bumpProgress()
-
-        if (insertedRow?.id) {
-          setImagenes((prev) => {
-            const next = [insertedRow, ...prev]
-            const seen = new Set()
-            return next.filter((x) => {
-              if (!x?.id) return false
-              if (seen.has(x.id)) return false
-              seen.add(x.id)
-              return true
+          if (insertedRow?.id) {
+            setImagenes((prev) => {
+              const next = [insertedRow, ...prev]
+              const seen = new Set()
+              return next.filter((x) => {
+                if (!x?.id) return false
+                if (seen.has(x.id)) return false
+                seen.add(x.id)
+                return true
+              })
             })
-          })
+          }
+        } catch (itemErr) {
+          console.error("Item upload error:", itemErr)
+          failed.push({ name: label, message: itemErr?.message || String(itemErr) })
+          // Keep progress moving for remaining estimated steps of this item
+          bumpProgress()
+          bumpProgress()
         }
       }
 
-      confetti({
-        particleCount: 150,
-        spread: 70,
-        origin: { y: 0.6 },
-        colors: ['#ff7da3', '#f84a7e', '#ffffff']
-      })
-
-      setShowUploadModal(false)
-      setSelectedFiles([])
-      setUploadProgress(0)
-      setUploadStatus("")
-      setSelectedAudioFile(null)
-      setAudioTrimData(null)
-      setTrimData(null)
-      setUploadData({
-        fecha: new Date().toISOString().split('T')[0],
-        ubicacion: "",
-        nota: ""
-      })
-      obtenerImagenes()
+      setUploadProgress(100)
+      if (failed.length === 0) {
+        confetti({
+          particleCount: 150,
+          spread: 70,
+          origin: { y: 0.6 },
+          colors: ["#ff7da3", "#f84a7e", "#ffffff"],
+        })
+        setShowUploadModal(false)
+        setSelectedFiles([])
+        setTrimData(null)
+        setUploadData({
+          fecha: new Date().toISOString().split("T")[0],
+          ubicacion: "",
+          nota: "",
+        })
+        obtenerImagenes()
+      } else if (failed.length < items.length) {
+        confetti({
+          particleCount: 80,
+          spread: 60,
+          origin: { y: 0.7 },
+          colors: ["#ff7da3", "#f84a7e"],
+        })
+        alert(
+          `Se subieron ${items.length - failed.length} de ${items.length}. Fallaron:\n` +
+            failed.map((f) => `• ${f.name}: ${f.message}`).join("\n")
+        )
+        setShowUploadModal(false)
+        setSelectedFiles([])
+        setTrimData(null)
+        obtenerImagenes()
+      } else {
+        alert(
+          "No se pudo subir el lote:\n" +
+            failed.map((f) => `• ${f.name}: ${f.message}`).join("\n")
+        )
+      }
     } catch (err) {
       console.error("Upload error:", err)
-      setUploadStatus("")
       alert("Error al subir: " + (err?.message || String(err)))
     } finally {
       setUploading(false)
+      setUploadStatus("")
+      setUploadProgress(0)
+      setSelectedAudioFile(null)
+      setAudioTrimData(null)
     }
   }
 
@@ -1173,59 +1245,72 @@ export default function Home() {
     setUpdating(true)
     try {
       let finalMetadata = { ...(selectedImage.metadata || {}) }
-      
-      // 1. Handle new audio upload if selected
-      if (selectedAudioFile) {
-        const audioExt = selectedAudioFile.name.split('.').pop()
+
+      if (youtubeEditAudio?.videoId) {
+        finalMetadata.audio = {
+          source: "youtube",
+          videoId: youtubeEditAudio.videoId,
+          name: youtubeEditAudio.name || "YouTube",
+          thumbnail: youtubeEditAudio.thumbnail || "",
+          startTime: youtubeEditAudio.startTime || 0,
+        }
+      } else if (selectedAudioFile) {
+        const audioExt = selectedAudioFile.name.split(".").pop()
         const audioName = `musica/${Date.now()}-${Math.random().toString(36).substring(2, 7)}.${audioExt}`
-        
+
         const { error: audioError } = await supabase.storage
           .from("fotos")
           .upload(audioName, selectedAudioFile)
-        
+
         if (audioError) throw audioError
-        
-        const { data: { publicUrl: audioUrl } } = supabase.storage
-          .from("fotos")
-          .getPublicUrl(audioName)
-          
+
+        const {
+          data: { publicUrl: audioUrl },
+        } = supabase.storage.from("fotos").getPublicUrl(audioName)
+
         finalMetadata.audio = {
+          source: "local",
           url: audioUrl,
-          name: selectedAudioFile.name.replace(/\.[^/.]+$/, ""), // Clean extension
-          startTime: audioTrimData?.startTime || 0
+          name: selectedAudioFile.name.replace(/\.[^/.]+$/, ""),
+          startTime: audioTrimData?.startTime || 0,
         }
       } else if (audioTrimData && selectedImage.metadata?.audio) {
-        // Just updating the trim of existing audio
         finalMetadata.audio = {
           ...selectedImage.metadata.audio,
-          startTime: audioTrimData.startTime
+          startTime: audioTrimData.startTime,
         }
       }
 
-      // 2. Perform the database update
       const { error } = await supabase
         .from("fotos")
-        .update({ 
+        .update({
           fecha: editForm.fecha,
           ubicacion: editForm.ubicacion,
           nota: editForm.nota,
-          metadata: finalMetadata
+          metadata: finalMetadata,
         })
-        .eq('id', selectedImage.id)
+        .eq("id", selectedImage.id)
 
       if (error) throw error
 
-      setImagenes(imagenes.map(img => img.id === selectedImage.id ? { ...img, ...editForm, metadata: finalMetadata } : img))
+      setImagenes(
+        imagenes.map((img) =>
+          img.id === selectedImage.id
+            ? { ...img, ...editForm, metadata: finalMetadata }
+            : img
+        )
+      )
       setSelectedImage({ ...selectedImage, ...editForm, metadata: finalMetadata })
       setIsEditing(false)
       setSelectedAudioFile(null)
       setAudioTrimData(null)
-      
+      setYoutubeEditAudio(null)
+
       confetti({
         particleCount: 50,
         spread: 30,
         origin: { y: 0.8 },
-        colors: ['#ff7da3', '#f84a7e']
+        colors: ["#ff7da3", "#f84a7e"],
       })
     } catch (err) {
       alert("Error al actualizar: " + err.message)
@@ -1424,29 +1509,56 @@ export default function Home() {
   }
 
   async function descargarTodo() {
-    if (imagenes.length === 0) return
+    if (imagenes.length === 0 || downloadingAll) return
     const zip = new JSZip()
     const folder = zip.folder("nuestra-vida-juntos")
-    
-    try {
-      const downloadPromises = imagenes.map(async (img, index) => {
-        const response = await fetch(img.url)
-        const blob = await response.blob()
-        const ext = img.url.split('.').pop().split('?')[0]
-        folder.file(`recuerdo-${img.fecha}-${index + 1}.${ext}`, blob)
-      })
 
-      await Promise.all(downloadPromises)
-      const content = await zip.generateAsync({ type: "blob" })
-      saveAs(content, "nuestra-vida-juntos.zip")
-      
+    setDownloadingAll(true)
+    setDownloadProgress(0)
+    setDownloadStatus("Preparando descarga...")
+
+    try {
+      for (let index = 0; index < imagenes.length; index++) {
+        const img = imagenes[index]
+        setDownloadStatus(`Descargando ${index + 1}/${imagenes.length}...`)
+        try {
+          const response = await fetch(img.url)
+          const blob = await response.blob()
+          const ext = (img.url.split(".").pop() || "jpg").split("?")[0]
+          folder.file(`recuerdo-${img.fecha}-${index + 1}.${ext}`, blob)
+        } catch (fileErr) {
+          console.warn("Skip file download:", fileErr)
+        }
+        setDownloadProgress(
+          Math.round(((index + 1) / (imagenes.length + 1)) * 100)
+        )
+      }
+
+      setDownloadStatus("Creando ZIP...")
+      const content = await zip.generateAsync({ type: "blob" }, (meta) => {
+        const base = Math.round((imagenes.length / (imagenes.length + 1)) * 100)
+        setDownloadProgress(
+          Math.min(99, base + Math.round(((meta.percent || 0) / 100) * (100 / (imagenes.length + 1))))
+        )
+      })
+      const stamp = new Date().toISOString().slice(0, 10)
+      saveAs(content, `nuestra-vida-juntos-${stamp}.zip`)
+      setDownloadProgress(100)
+      setDownloadStatus("¡Listo!")
+
       confetti({
-          particleCount: 100,
+        particleCount: 100,
         spread: 70,
-        origin: { y: 0.6 }
+        origin: { y: 0.6 },
       })
     } catch (err) {
       alert("Error al descargar")
+    } finally {
+      setTimeout(() => {
+        setDownloadingAll(false)
+        setDownloadProgress(0)
+        setDownloadStatus("")
+      }, 600)
     }
   }
 
@@ -1962,6 +2074,23 @@ export default function Home() {
     <div className="min-h-screen bg-romantic-50 pb-20">
       <HeartRain />
       <audio ref={audioRef} className="hidden" />
+      {selectedImage && isYouTubeAudio(selectedImage.metadata?.audio) && selectedStoryIndex === null && (
+        <YouTubeAudioPlayer
+          videoId={selectedImage.metadata.audio.videoId}
+          startTime={selectedImage.metadata.audio.startTime || 0}
+          active
+        />
+      )}
+      {selectedStoryIndex !== null &&
+        isYouTubeAudio(historiasOrdenadas[selectedStoryIndex]?.metadata?.audio) && (
+          <YouTubeAudioPlayer
+            videoId={historiasOrdenadas[selectedStoryIndex].metadata.audio.videoId}
+            startTime={
+              historiasOrdenadas[selectedStoryIndex].metadata.audio.startTime || 0
+            }
+            active
+          />
+        )}
       {/* Header */}
       <header className="bg-white/80 backdrop-blur-md sticky top-0 z-30 border-b border-romantic-100 px-4 sm:px-6 xl:px-12 py-4">
         <div className="w-full flex items-center justify-between">
@@ -1984,12 +2113,18 @@ export default function Home() {
           <div className="flex items-center gap-2 sm:gap-3">
             <button
               onClick={descargarTodo}
-              disabled={imagenes.length === 0}
+              disabled={imagenes.length === 0 || downloadingAll}
               title="Descargar todo"
               className="p-2.5 sm:px-4 sm:py-2 bg-white border border-romantic-200 text-romantic-600 rounded-full hover:bg-romantic-50 transition-colors text-sm font-medium disabled:opacity-50"
             >
-              <Download className="w-4 h-4 sm:mr-2 sm:inline" />
-              <span className="hidden sm:inline">Descargar todo</span>
+              {downloadingAll ? (
+                <Loader2 className="w-4 h-4 sm:mr-2 sm:inline animate-spin" />
+              ) : (
+                <Download className="w-4 h-4 sm:mr-2 sm:inline" />
+              )}
+              <span className="hidden sm:inline">
+                {downloadingAll ? `${downloadProgress}%` : "Descargar todo"}
+              </span>
             </button>
             
             <button
@@ -2739,161 +2874,23 @@ export default function Home() {
         )}
       </AnimatePresence>
 
-      {/* Upload Modal */}
+      {/* Upload Modal — masivo por foto */}
       <AnimatePresence>
-        {showUploadModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => !uploading && setShowUploadModal(false)}
-              className="absolute inset-0 bg-romantic-900/40 backdrop-blur-sm"
-            />
-            
-            <motion.div 
-              initial={{ scale: 0.9, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.9, opacity: 0, y: 20 }}
-              className="relative bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden"
-            >
-              <div className="bg-romantic-500 px-6 py-4 flex items-center justify-between text-white">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="w-5 h-5" />
-                  <h3 className="font-bold">Nuevo Recuerdo</h3>
-                </div>
-                {!uploading && (
-                  <button onClick={() => setShowUploadModal(false)} className="hover:bg-white/20 p-1 rounded-full">
-                    <X className="w-5 h-5" />
-                  </button>
-                )}
-              </div>
-
-              <div className="p-6 space-y-4">
-                <div className="flex items-center gap-3 bg-romantic-50 p-3 rounded-2xl">
-                  <div className="bg-white p-2 rounded-xl shadow-sm">
-                    <ImageIcon className="text-romantic-400 w-6 h-6" />
-                  </div>
-                  <div>
-                    <p className="text-sm font-bold text-gray-700">
-                      {selectedFiles.length} {selectedFiles.length === 1 
-                        ? (isVideo(selectedFiles[0].name) ? "video seleccionado" : "foto seleccionada") 
-                        : "archivos seleccionados"}
-                    </p>
-                    <p className="text-[10px] text-gray-400 italic">¡Vamos a ponerles detalles bonitos!</p>
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-romantic-400 uppercase ml-2 tracking-wider">¿Cuándo pasó?</label>
-                    <div className="relative">
-                      <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                      <input 
-                        type="date" 
-                        value={uploadData.fecha}
-                        onChange={(e) => setUploadData((prev) => ({ ...prev, fecha: e.target.value }))}
-                        className="w-full bg-gray-50 border-none rounded-2xl py-3 pl-11 pr-4 text-sm focus:ring-2 focus:ring-romantic-300"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-romantic-400 uppercase ml-2 tracking-wider">¿Dónde fue?</label>
-                    <div className="relative">
-                      <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                      <input 
-                        type="text" 
-                        placeholder="Ej: Nuestra primera cita, En la playa..."
-                        value={uploadData.ubicacion}
-                        onChange={(e) => setUploadData((prev) => ({ ...prev, ubicacion: e.target.value }))}
-                        className="w-full bg-gray-50 border-none rounded-2xl py-3 pl-11 pr-4 text-sm focus:ring-2 focus:ring-romantic-300"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-romantic-400 uppercase ml-2 tracking-wider">Escribe una nota linda</label>
-                    <div className="relative">
-                      <MessageSquare className="absolute left-4 top-4 w-4 h-4 text-gray-400" />
-                      <textarea 
-                        placeholder="Escribe algo que nunca quieras olvidar..."
-                        value={uploadData.nota}
-                        onChange={(e) => setUploadData((prev) => ({ ...prev, nota: e.target.value }))}
-                        className="w-full bg-gray-50 border-none rounded-2xl py-3 pl-11 pr-4 text-sm focus:ring-2 focus:ring-romantic-300 min-h-[100px] resize-none"
-                      />
-                    </div>
-                  </div>
-
-                  {!isVideo(selectedFiles[0]?.name) && (
-                    <div className="pt-2">
-                        <input 
-                          type="file" 
-                          accept="audio/*, .mp3, .wav, .m4a, .aac, .ogg" 
-                          className="hidden" 
-                          ref={musicInputRef}
-                         onChange={(e) => {
-                           if (e.target.files[0]) {
-                             setSelectedAudioFile(e.target.files[0])
-                             setShowMusicModal(true)
-                           }
-                         }}
-                       />
-                       <button
-                         type="button"
-                         onClick={() => musicInputRef.current.click()}
-                         className={`w-full py-3 rounded-2xl border-2 border-dashed flex items-center justify-center gap-2 transition-all ${
-                          selectedAudioFile 
-                            ? 'border-romantic-200 bg-romantic-50 text-romantic-600' 
-                            : 'border-gray-200 text-gray-400 hover:border-romantic-200 hover:text-romantic-500'
-                         }`}
-                       >
-                         <Music className="w-4 h-4" />
-                         <span className="text-xs font-bold uppercase tracking-tight">
-                           {selectedAudioFile ? "Cambiar Música" : "Añadir Música de Fondo"}
-                         </span>
-                       </button>
-                       {selectedAudioFile && (
-                         <p className="text-[10px] text-center mt-2 text-romantic-400 font-bold italic">
-                           🎵 {selectedAudioFile.name} (Fragmento listo)
-                         </p>
-                       )}
-                    </div>
-                  )}
-                </div>
-
-                <button
-                  onClick={subirImagenes}
-                  disabled={uploading}
-                  className="w-full bg-romantic-500 text-white py-4 rounded-2xl font-bold shadow-lg shadow-romantic-200 hover:bg-romantic-600 transition-all active:scale-[0.98] disabled:opacity-70 flex flex-col items-center justify-center gap-1"
-                >
-                  {uploading ? (
-                    <>
-                      <div className="flex items-center gap-2">
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                        <span>{uploadStatus || "Guardando para siempre..."}</span>
-                      </div>
-                      <div className="w-full max-w-[200px] h-1 bg-white/30 rounded-full mt-2 overflow-hidden px-4">
-                        <motion.div 
-                          initial={{ width: 0 }}
-                          animate={{ width: `${uploadProgress}%` }}
-                          className="h-full bg-white"
-                        />
-                      </div>
-                      <span className="text-[10px] font-bold opacity-80">{uploadProgress}%</span>
-                    </>
-                  ) : (
-                    <>
-                      <div className="flex items-center gap-2">
-                        <Heart className="w-5 h-5" />
-                        <span>Guardar en Nuestra Vida</span>
-                      </div>
-                    </>
-                  )}
-                </button>
-              </div>
-            </motion.div>
-          </div>
+        {showUploadModal && selectedFiles.length > 0 && (
+          <BulkUploadModal
+            files={selectedFiles}
+            initialTrim={trimData}
+            uploading={uploading}
+            uploadProgress={uploadProgress}
+            uploadStatus={uploadStatus}
+            onClose={() => {
+              if (uploading) return
+              setShowUploadModal(false)
+              setSelectedFiles([])
+              setTrimData(null)
+            }}
+            onUpload={subirImagenes}
+          />
         )}
       </AnimatePresence>
 
@@ -3251,37 +3248,30 @@ export default function Home() {
 
                       <div className="pt-2 p-4 bg-romantic-50/50 rounded-2xl border border-dashed border-romantic-200">
                         <p className="text-[10px] font-bold uppercase text-romantic-400 mb-3 ml-1">Música de Fondo</p>
-                        <input 
-                          type="file" 
-                          accept="audio/*, .mp3, .wav, .m4a, .aac, .ogg" 
-                          className="hidden" 
-                          ref={musicInputRef}
-                          onChange={(e) => {
-                            if (e.target.files[0]) {
-                              setSelectedAudioFile(e.target.files[0])
-                              setShowMusicModal(true)
-                            }
-                          }}
-                        />
                         <button
                           type="button"
-                          onClick={() => musicInputRef.current.click()}
+                          onClick={() => setShowMusicModal(true)}
                           className={`w-full py-4 rounded-xl border-2 border-dashed flex items-center justify-center gap-2 transition-all ${
-                            (selectedAudioFile || selectedImage.metadata?.audio)
+                            (selectedAudioFile || youtubeEditAudio || selectedImage.metadata?.audio)
                                ? 'border-romantic-300 bg-white text-romantic-600 shadow-sm' 
                                : 'border-gray-200 text-gray-400 hover:border-romantic-200 hover:text-romantic-500 bg-white'
                           }`}
                         >
                           <Music className="w-5 h-5" />
                           <span className="text-sm font-bold uppercase tracking-tight">
-                            {selectedImage.metadata?.audio ? "Cambiar Música" : "Añadir Música"}
+                            {selectedImage.metadata?.audio || selectedAudioFile || youtubeEditAudio
+                              ? "Cambiar Música"
+                              : "Añadir Música"}
                           </span>
                         </button>
-                        {(selectedAudioFile || selectedImage.metadata?.audio) && (
+                        {(selectedAudioFile || youtubeEditAudio || selectedImage.metadata?.audio) && (
                           <div className="flex items-center justify-center gap-2 mt-3 text-romantic-500">
                              <Music className="w-3 h-3 animate-bounce" />
-                             <p className="text-[10px] font-bold italic">
-                              {selectedAudioFile ? selectedAudioFile.name : "Música actual guardada"}
+                             <p className="text-[10px] font-bold italic truncate max-w-[240px]">
+                              {youtubeEditAudio?.name ||
+                                selectedAudioFile?.name ||
+                                selectedImage.metadata?.audio?.name ||
+                                "Música actual guardada"}
                             </p>
                           </div>
                         )}
@@ -3394,22 +3384,48 @@ export default function Home() {
         className="hidden" 
       />
 
-      <audio ref={audioRef} loop={false} />
+      <AnimatePresence>
+        {showMusicModal && (
+          <MusicPicker
+            onConfirm={(payload) => {
+              if (payload.source === "youtube") {
+                setYoutubeEditAudio(payload)
+                setSelectedAudioFile(null)
+                setAudioTrimData(null)
+              } else {
+                setSelectedAudioFile(payload.file)
+                setAudioTrimData({ startTime: payload.startTime || 0 })
+                setYoutubeEditAudio(null)
+              }
+              setShowMusicModal(false)
+            }}
+            onCancel={() => setShowMusicModal(false)}
+          />
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
-        {showMusicModal && selectedAudioFile && (
-          <MusicSelector 
-            file={selectedAudioFile}
-            onConfirm={(data) => {
-              setAudioTrimData(data)
-              setShowMusicModal(false)
-            }}
-            onCancel={() => {
-              setSelectedAudioFile(null)
-              setAudioTrimData(null)
-              setShowMusicModal(false)
-            }}
-          />
+        {downloadingAll && (
+          <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/70 backdrop-blur-sm p-6">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="bg-white rounded-[28px] p-8 max-w-sm w-full shadow-2xl text-center space-y-4"
+            >
+              <Loader2 className="w-10 h-10 animate-spin text-romantic-500 mx-auto" />
+              <div>
+                <p className="font-black text-gray-800">Descarga masiva</p>
+                <p className="text-xs text-gray-500 mt-1">{downloadStatus}</p>
+              </div>
+              <div className="w-full h-2 bg-romantic-100 rounded-full overflow-hidden">
+                <motion.div
+                  className="h-full bg-romantic-500"
+                  animate={{ width: `${downloadProgress}%` }}
+                />
+              </div>
+              <p className="text-sm font-bold text-romantic-500">{downloadProgress}%</p>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
 
