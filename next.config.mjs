@@ -15,6 +15,11 @@ const nextConfig = {
       },
     ],
   },
+  // Node 24 on Windows can throw EISDIR on fs.readlink for normal files.
+  webpack: (config) => {
+    config.resolve.symlinks = false
+    return config
+  },
 };
 
 export default nextConfig;
